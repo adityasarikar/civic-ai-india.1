@@ -1,112 +1,234 @@
-let user = null;
-let model;
-let lastData = null;
-let lastId = null;
+// Import from firebase.js
+import {
+  auth,
+  provider,
+  signInWithPopup,
+  db,
+  storage,
+  collection,
+  addDoc,
+  updateDoc,
+  doc,
+  getDocs,
+  query,
+  where,
+  ref,
+  uploadBytes,
+  getDownloadURL
+} from "./firebase.js";
 
-// LOGIN
-function login() {
-  const provider = new firebase.auth.GoogleAuthProvider();
-  auth.signInWithPopup(provider).then(res => {
-    user = res.user;
-    document.getElementById("user").innerText = user.email;
+import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
-    db.collection("users").doc(user.uid).set({
-      email: user.email
-    });
-  });
-}
+let currentUser = null;
+let lastComplaintId = null;
+let model = null;
+let lastResult = null;
 
-// LOAD MODEL
+//
+// 🔐 LOGIN
+//
+window.login = async function () {
+  try {
+    const result = await signInWithPopup(auth, provider);
+    currentUser = result.user;
+
+    document.getElementById("user").innerText = currentUser.email;
+
+    console.log("Logged in:", currentUser.email);
+  } catch (err) {
+    console.error(err);
+    alert("Login failed");
+  }
+};
+
+//
+// 🔄 KEEP USER LOGGED IN
+//
+onAuthStateChanged(auth, (user) => {
+  if (user) {
+    currentUser = user;
+    const el = document.getElementById("user");
+    if (el) el.innerText = user.email;
+  }
+});
+
+//
+// 🤖 LOAD AI MODEL
+//
 async function loadModel() {
-  model = await tf.loadLayersModel("model/model.json");
+  try {
+    model = await tf.loadLayersModel("model/model.json");
+    console.log("Model loaded");
+  } catch (err) {
+    console.warn("Model not loaded yet (ok if not added)");
+  }
 }
 loadModel();
 
-// PROCESS IMAGE
-async function processImage() {
+//
+// 📸 PROCESS IMAGE + CLASSIFY
+//
+window.processImage = async function () {
   const file = document.getElementById("imageInput").files[0];
 
-  const ref = storage.ref("images/" + file.name);
-  await ref.put(file);
-  const url = await ref.getDownloadURL();
+  if (!file) {
+    alert("Upload image first");
+    return;
+  }
 
-  const img = new Image();
-  img.src = URL.createObjectURL(file);
+  try {
+    // Upload to Firebase Storage
+    const storageRef = ref(storage, "images/" + Date.now() + "_" + file.name);
+    await uploadBytes(storageRef, file);
+    const url = await getDownloadURL(storageRef);
 
-  img.onload = async () => {
-    const tensor = tf.browser.fromPixels(img)
-      .resizeNearestNeighbor([224,224])
-      .toFloat()
-      .expandDims();
+    // Load image into TensorFlow
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
 
-    const pred = await model.predict(tensor).data();
+    img.onload = async () => {
+      if (!model) {
+        alert("Model not loaded yet");
+        return;
+      }
 
-    const classes = ["battery","biological","plastic","paper","metal","trash"];
-    const i = pred.indexOf(Math.max(...pred));
-    const result = classes[i];
+      const tensor = tf.browser.fromPixels(img)
+        .resizeNearestNeighbor([224, 224])
+        .toFloat()
+        .expandDims();
 
-    document.getElementById("result").innerText = result;
+      const prediction = await model.predict(tensor).data();
 
-    lastData = { category: result, imageURL: url };
-  };
-}
+      const classes = [
+        "battery",
+        "biological",
+        "cardboard",
+        "glass",
+        "metal",
+        "paper",
+        "plastic",
+        "trash"
+      ];
 
-// CREATE
-async function createComplaint() {
-  if (!user || !lastData) return alert("Login & classify first");
+      const index = prediction.indexOf(Math.max(...prediction));
+      const result = classes[index];
 
-  const doc = await db.collection("complaints").add({
-    userId: user.uid,
-    category: lastData.category,
-    imageURL: lastData.imageURL,
-    status: "open",
-    createdAt: new Date()
-  });
+      document.getElementById("result").innerText = "Detected: " + result;
 
-  lastId = doc.id;
-  alert("Complaint created");
-}
+      lastResult = {
+        category: result,
+        imageURL: url
+      };
+    };
 
-// CLOSE
-async function closeComplaint() {
-  if (!lastId) return;
+  } catch (err) {
+    console.error(err);
+    alert("Upload/Classify error");
+  }
+};
 
-  await db.collection("complaints").doc(lastId).update({
-    status: "closed"
-  });
-}
+//
+// 🟢 CREATE COMPLAINT
+//
+window.createComplaint = async function () {
+  if (!currentUser || !lastResult) {
+    alert("Login and classify image first");
+    return;
+  }
 
-// WITHDRAW
-async function withdrawComplaint() {
+  try {
+    const docRef = await addDoc(collection(db, "complaints"), {
+      userId: currentUser.uid,
+      email: currentUser.email,
+      category: lastResult.category,
+      imageURL: lastResult.imageURL,
+      status: "open",
+      createdAt: new Date()
+    });
+
+    lastComplaintId = docRef.id;
+
+    alert("Complaint created successfully");
+  } catch (err) {
+    console.error(err);
+    alert("Error creating complaint");
+  }
+};
+
+//
+// 🔵 CLOSE COMPLAINT
+//
+window.closeComplaint = async function () {
+  if (!lastComplaintId) {
+    alert("No complaint selected");
+    return;
+  }
+
+  try {
+    await updateDoc(doc(db, "complaints", lastComplaintId), {
+      status: "closed"
+    });
+
+    alert("Complaint closed");
+  } catch (err) {
+    console.error(err);
+    alert("Error closing complaint");
+  }
+};
+
+//
+// 🔴 WITHDRAW COMPLAINT
+//
+window.withdrawComplaint = async function () {
   const reason = document.getElementById("reason").value;
 
-  await db.collection("complaints").doc(lastId).update({
-    status: "withdrawn",
-    reason: reason
-  });
-}
+  if (!lastComplaintId) {
+    alert("No complaint selected");
+    return;
+  }
 
-// DASHBOARD
-async function loadComplaints() {
-  auth.onAuthStateChanged(async (u) => {
-    if (!u) return;
+  try {
+    await updateDoc(doc(db, "complaints", lastComplaintId), {
+      status: "withdrawn",
+      reason: reason
+    });
 
-    const snapshot = await db.collection("complaints")
-      .where("userId","==",u.uid)
-      .get();
+    alert("Complaint withdrawn");
+  } catch (err) {
+    console.error(err);
+    alert("Error withdrawing complaint");
+  }
+};
 
-    const div = document.getElementById("complaints");
+//
+// 📊 LOAD DASHBOARD
+//
+window.loadComplaints = async function () {
+  onAuthStateChanged(auth, async (user) => {
+    if (!user) return;
 
-    snapshot.forEach(doc => {
-      const data = doc.data();
+    const q = query(
+      collection(db, "complaints"),
+      where("userId", "==", user.uid)
+    );
 
-      div.innerHTML += `
+    const querySnapshot = await getDocs(q);
+
+    const container = document.getElementById("complaints");
+    if (!container) return;
+
+    container.innerHTML = "";
+
+    querySnapshot.forEach((docItem) => {
+      const data = docItem.data();
+
+      container.innerHTML += `
         <div class="card">
-          <p>${data.category}</p>
-          <p>Status: ${data.status}</p>
-          <img src="${data.imageURL}" width="100">
+          <p><b>Category:</b> ${data.category}</p>
+          <p><b>Status:</b> ${data.status}</p>
+          <img src="${data.imageURL}" width="120"/>
         </div>
       `;
     });
   });
-}
+};
